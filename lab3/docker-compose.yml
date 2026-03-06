@@ -1,0 +1,95 @@
+services:
+  # GreenPlum Master - координирует запросы, не хранит данные
+  master:
+    image: woblerr/greenplum:6.26.4
+    container_name: master
+    hostname: master
+    user: root
+    ports:
+      - "5432:5432"
+    environment:
+      - GREENPLUM_DEPLOYMENT=master
+      - GREENPLUM_PASSWORD=gpadmin
+      - GREENPLUM_PXF_ENABLE=true
+      - GREENPLUM_DATABASE_NAME=toystore
+    volumes:
+      - ./config/gpinitsystem_config:/tmp/gpinitsystem_config
+      - ./config/hostfile_gpinitsystem:/tmp/hostfile_gpinitsystem
+      - ./config/ssh/id_rsa:/tmp/id_rsa
+      - ./config/ssh/id_rsa.pub:/tmp/id_rsa.pub
+      - ./sql:/home/gpadmin/sql
+    # SSH ключи: Windows монтирует с 777, SSH требует 600
+    # Копируем из /tmp, фиксим права, затем запускаем оригинальный entrypoint
+    entrypoint: ["/bin/bash", "-c", "cp /tmp/id_rsa /home/gpadmin/.ssh/id_rsa && cp /tmp/id_rsa.pub /home/gpadmin/.ssh/id_rsa.pub && chown gpadmin:gpadmin /home/gpadmin/.ssh/id_rsa /home/gpadmin/.ssh/id_rsa.pub && chmod 600 /home/gpadmin/.ssh/id_rsa && chmod 644 /home/gpadmin/.ssh/id_rsa.pub && exec /entrypoint.sh /start_gpdb.sh"]
+    depends_on:
+      - segment1
+      - segment2
+    networks:
+      - gpnet
+
+  # GreenPlum Segment 1 - хранит и обрабатывает часть данных
+  segment1:
+    image: woblerr/greenplum:6.26.4
+    container_name: segment1
+    hostname: segment1
+    user: root
+    entrypoint: ["/entrypoint.sh"]
+    command: ["/start_gpdb.sh", "00:primary"]
+    environment:
+      - GREENPLUM_DEPLOYMENT=segment
+    volumes:
+      - ./config/ssh/authorized_keys:/tmp/authorized_keys
+    stop_grace_period: 60s
+    networks:
+      - gpnet
+
+  # GreenPlum Segment 2 - хранит и обрабатывает другую часть данных
+  segment2:
+    image: woblerr/greenplum:6.26.4
+    container_name: segment2
+    hostname: segment2
+    user: root
+    entrypoint: ["/entrypoint.sh"]
+    command: ["/start_gpdb.sh", "00:primary"]
+    environment:
+      - GREENPLUM_DEPLOYMENT=segment
+    volumes:
+      - ./config/ssh/authorized_keys:/tmp/authorized_keys
+    stop_grace_period: 60s
+    networks:
+      - gpnet
+
+  # Oracle XE - дополнительное хранилище (по заданию)
+  # Python-скрипт загрузит CSV сюда, потом PXF перенесет в GreenPlum
+  oracle:
+    image: gvenzl/oracle-xe:21-slim
+    container_name: oracle
+    hostname: oracle
+    ports:
+      - "1521:1521"
+    environment:
+      - ORACLE_PASSWORD=oracle123
+      - APP_USER=toystore
+      - APP_USER_PASSWORD=toystore123
+    volumes:
+      - ./oracle-init:/container-entrypoint-initdb.d
+    networks:
+      - gpnet
+
+  # gpfdist - HTTP-сервер для параллельной загрузки CSV (усложненный вариант)
+  gpfdist:
+    image: woblerr/greenplum:6.26.4
+    container_name: gpfdist
+    hostname: gpfdist
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    entrypoint: ["/bin/bash", "-c",
+      "source /usr/local/greenplum-db/greenplum_path.sh &&
+       gpfdist -d /data -p 8080 -l /data/gpfdist.log"]
+    networks:
+      - gpnet
+
+networks:
+  gpnet:
